@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools<81.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sam3_engine"
+version = "0.1.0"
+dependencies = [
+    # sam3 is already installed in your env, but you can declare other lightweight dependencies here
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]  # Remove or change to ["."] if your module folder sits directly in root instead of src/
