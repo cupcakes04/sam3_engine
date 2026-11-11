@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from typing import Any, Optional, Literal
 import torch
 
@@ -73,6 +74,13 @@ class SAM3Engine:
         self.video_checkpoint_path = _resolve_checkpoint(video_checkpoint_path)
         self.video_version = video_version
 
+        if precision != "bfloat16":
+            warnings.warn(
+                f"precision={precision!r} applies to the image engine only. The sam3 video predictor "
+                "hard-codes torch.autocast(bfloat16) internally, so video inference always runs in bfloat16.",
+                stacklevel=2,
+            )
+
         # Enable TensorFloat-32 for Ampere GPUs if available
         if torch.cuda.is_available() and device.startswith("cuda"):
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -118,6 +126,7 @@ class SAM3Engine:
                 model=model,
                 device=self.device,
                 confidence_threshold=self.confidence_threshold,
+                precision=self.precision,
             )
         return self._image_engine
 

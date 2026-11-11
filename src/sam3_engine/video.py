@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Union
 import cv2
 import numpy as np
 from PIL import Image
 import torch
 
-from sam3_engine.types import Box, CachedConcept, Concepts, Label, Mask, Points, Result
+from sam3_engine.types import Box, CachedConcept, Label, Mask, Points, Result
 from sam3_engine.vis import tensor_to_numpy
 
 
@@ -237,20 +237,21 @@ class SAM3VideoEngine:
 
     def add_points(
         self,
-        points: Union[Points, Sequence[Points]],
-        label: Union[Label, Sequence[Label]] = 1,
+        points: Sequence[Points],
+        label: Sequence[Label],
     ) -> None:
         """
-        Adds point prompt(s) in absolute pixel coordinates (x, y) with label (1=pos, 0=neg)
-        to the active object on the active keyframe.
+        Adds point prompts in absolute pixel coordinates to the active object on the active keyframe.
+        `points` is a list of (x, y); `label` is a list of 1 (positive) / 0 (negative)
+        with exactly one label per point.
         """
+        if len(points) != len(label):
+            raise ValueError(
+                f"points and label must have equal length, got {len(points)} points and {len(label)} labels."
+            )
         self._ensure_session()
-        if isinstance(points[0], (int, float)):
-            pts_list = [points]
-            lbls_list = [label]
-        else:
-            pts_list = list(points)
-            lbls_list = list(label) if isinstance(label, (list, tuple)) else [label] * len(pts_list)
+        pts_list = list(points)
+        lbls_list = list(label)
 
         img_w, img_h = self.video[self.active_frame_idx].size
         norm_coords = [

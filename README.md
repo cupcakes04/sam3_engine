@@ -4,6 +4,8 @@ A standalone, first-principles Python engine built directly on Meta's native **S
 
 Interactive workflows and step-by-step demonstrations are available in [notebook](./workflow.ipynb).
 
+Full documentation (concepts, API reference, guides, complete walkthrough, gotchas) lives in [docs/](./docs/README.md).
+
 ---
 
 ## Setups

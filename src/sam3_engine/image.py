@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import copy
+import functools
 from typing import Any, Dict, List, Optional, Sequence, Union
 import numpy as np
 from PIL import Image
 import torch
 import torchvision.transforms.v2 as v2
 
-from sam3_engine.types import Box, CachedConcept, Concepts, Label, Mask, Points, Result
+from sam3_engine.types import Box, CachedConcept, Label, Mask, Points, Result
 from sam3_engine.vis import tensor_to_numpy
 from sam3.model.data_misc import FindStage, interpolate
 from sam3.model import box_ops
@@ -22,6 +24,24 @@ def _to_pil_list(images: Union[Image.Image, Sequence[Image.Image]]) -> List[Imag
             raise ValueError("images list cannot be empty.")
         return [img.convert("RGB") if isinstance(img, Image.Image) else Image.fromarray(np.asarray(img)).convert("RGB") for img in images]
     raise TypeError(f"Expected PIL Image or Sequence[PIL.Image], got {type(images)}")
+
+
+_PRECISION_DTYPES = {
+    "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+    "float32": torch.float32,
+}
+
+
+def _with_precision(fn):
+    """Runs the wrapped method under the engine's autocast precision context."""
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._precision_context():
+            return fn(self, *args, **kwargs)
+
+    return wrapper
 
 
 class ObjectState:
@@ -66,9 +86,13 @@ class SAM3ImageEngine:
         device: str = "cuda",
         resolution: int = 1008,
         confidence_threshold: float = 0.5,
+        precision: str = "bfloat16",
     ):
+        if precision not in _PRECISION_DTYPES:
+            raise ValueError(f"precision must be one of {list(_PRECISION_DTYPES)}, got {precision!r}")
         self.model = model
         self.device = device
+        self.precision = precision
         self.resolution = resolution
         self.confidence_threshold = confidence_threshold
 
@@ -98,10 +122,18 @@ class SAM3ImageEngine:
         """Sets the dynamic confidence threshold for predictions."""
         self.confidence_threshold = float(threshold)
 
+    def _precision_context(self):
+        """torch.autocast for bfloat16/float16 on CUDA; no-op for float32 or CPU."""
+        dtype = _PRECISION_DTYPES[self.precision]
+        if dtype == torch.float32 or not str(self.device).startswith("cuda"):
+            return contextlib.nullcontext()
+        return torch.autocast(device_type="cuda", dtype=dtype)
+
     # -------------------------------------------------------------------------
     # 2. Session Initialization & Feature Extraction
     # -------------------------------------------------------------------------
     @torch.inference_mode()
+    @_with_precision
     def initialise(self, images: Union[Image.Image, List[Image.Image]]) -> None:
         """
         Initializes an image session with one or more PIL images.
@@ -147,6 +179,7 @@ class SAM3ImageEngine:
     # 2.1 Concept Caching & PCS Prompting
     # -------------------------------------------------------------------------
     @torch.inference_mode()
+    @_with_precision
     def encode_concept(self, text: str) -> CachedConcept:
         """
         Precomputes and returns raw text embedding dict from the model's text backbone.
@@ -229,38 +262,20 @@ class SAM3ImageEngine:
     # PCS Prediction
     # -------------------------------------------------------------------------
     @torch.inference_mode()
-    def predict_pcs(
-        self,
-        concepts: Optional[Union[str, CachedConcept, Sequence[Union[str, CachedConcept]], Concepts]] = None,
-    ) -> None:
+    @_with_precision
+    def predict_pcs(self) -> None:
         """
-        Evaluates active concepts across all initialized images and updates internal object states.
-        Supports:
-        - None: evaluates accumulated concepts from add_concept / add_exemplar.
-        - Plain text string or precomputed CachedConcept dict.
-        - List of text strings or CachedConcepts.
-        - Concepts dictionary with 'text', 'exemplar', 'exemplar_labels'.
-        Populates internal object state so detections can be immediately inspected via get_results()
+        Evaluates the staged concepts (add_concept / add_exemplar) across all initialized
+        images and updates internal object states. Takes no arguments (mirrors predict_pvs):
+        stage prompts first, then call this.
+        Clears all existing objects on every image before running.
+        Populates internal object state so detections can be inspected via get_results()
         or interactively refined with PVS.
         """
         if self.backbone_out is None or len(self.images) == 0:
             raise RuntimeError("Engine not initialised. Call engine.image.initialise(images) first.")
-
-        # If one-shot concepts are provided, load them into state
-        if concepts is not None:
-            self.reset_pcs()
-            if isinstance(concepts, (str, dict)) and "text" not in concepts and "exemplar" not in concepts:
-                self.add_concept(concepts)
-            elif isinstance(concepts, (list, tuple)):
-                for c in concepts:
-                    self.add_concept(c)
-            elif isinstance(concepts, dict):
-                for c in concepts.get("text", []):
-                    self.add_concept(c)
-                ex_boxes = concepts.get("exemplar", [])
-                ex_labels = concepts.get("exemplar_labels", [1] * len(ex_boxes))
-                if len(ex_boxes) > 0:
-                    self.add_exemplar(ex_boxes, ex_labels)
+        if len(self.pcs_text_concepts) == 0 and len(self.pcs_exemplar_boxes) == 0:
+            raise RuntimeError("No concepts registered. Call add_concept() or add_exemplar() first.")
 
         # Process each image in the batch
         for img_idx, img in enumerate(self.images):
@@ -452,23 +467,21 @@ class SAM3ImageEngine:
 
     def add_points(
         self,
-        points: Union[Points, Sequence[Points]],
-        label: Union[Label, Sequence[Label]],
+        points: Sequence[Points],
+        label: Sequence[Label],
     ) -> None:
         """
-        Adds point prompt(s) in absolute pixel coordinates (x, y) with label (1=pos, 0=neg).
+        Adds point prompts in absolute pixel coordinates.
+        `points` is a list of (x, y); `label` is a list of 1 (positive) / 0 (negative)
+        with exactly one label per point.
         """
+        if len(points) != len(label):
+            raise ValueError(
+                f"points and label must have equal length, got {len(points)} points and {len(label)} labels."
+            )
         self._ensure_active_object()
         obj = self.objects[self.active_idx][self.active_obj_id]
-
-        if isinstance(points[0], (int, float)):
-            pts_list = [points]
-            lbls_list = [label]
-        else:
-            pts_list = list(points)
-            lbls_list = list(label) if isinstance(label, (list, tuple)) else [label] * len(pts_list)
-
-        for p, l in zip(pts_list, lbls_list):
+        for p, l in zip(points, label):
             obj.points.append((float(p[0]), float(p[1])))
             obj.point_labels.append(int(l))
         obj.dirty = True
@@ -483,6 +496,7 @@ class SAM3ImageEngine:
         self.active_obj_id = 1
 
     @torch.inference_mode()
+    @_with_precision
     def predict_pvs(self) -> None:
         """
         Runs interactive instance prediction (PVS) for any object with uncomputed prompts on the active image.

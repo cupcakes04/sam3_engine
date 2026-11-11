@@ -40,13 +40,3 @@ class Result(TypedDict):
 # -------------------------------------------------------------------------
 type CachedConcept = Dict[str, torch.Tensor]
 """Precomputed concept text embeddings mapping from text backbone forward_text."""
-
-class Concepts(TypedDict, total=False):
-    """
-    Optional container for active concepts to evaluate in PCS.
-    """
-    text: List[Union[str, CachedConcept]]
-    exemplar: List[Box]
-    exemplar_labels: List[Label]
-
-

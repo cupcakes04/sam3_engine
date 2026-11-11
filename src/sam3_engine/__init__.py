@@ -6,7 +6,6 @@ from sam3_engine.video import SAM3VideoEngine, load_video_frames
 from sam3_engine.types import (
     Box,
     CachedConcept,
-    Concepts,
     Label,
     Mask,
     Points,
@@ -25,7 +24,6 @@ __all__ = [
     "Label",
     "Result",
     "CachedConcept",
-    "Concepts",
     "load_video_frames",
     "tensor_to_numpy",
     "get_distinct_colors",
